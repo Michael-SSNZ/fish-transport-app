@@ -114,23 +114,37 @@ with st.sidebar:
                 "\n".join([f"- {tank}: {vol:,}L" for tank, vol in TANKER_CONFIGS[selected_tanker].items()]))
         
         st.divider()
-        
+
+        # Tank selection
+        st.subheader("Tank Selection")
+        st.caption("Uncheck tanks not available on this load")
+        active_tank_names = []
+        for tank_name in TANKER_CONFIGS[selected_tanker].keys():
+            if st.checkbox(tank_name, value=True, key=f"tank_active_{selected_tanker}_{tank_name}"):
+                active_tank_names.append(tank_name)
+
+        if not active_tank_names:
+            st.warning("Select at least one tank")
+
+        st.divider()
+
         # Tank configuration option
         st.subheader("Tank Configuration")
         use_custom_tanks = st.checkbox("Customize tank volumes", value=False)
-        
+
         if use_custom_tanks:
             tanks = {}
             for tank_name, default_vol in TANKER_CONFIGS[selected_tanker].items():
-                tanks[tank_name] = st.number_input(
-                    f"{tank_name} volume (L)",
-                    min_value=100,
-                    value=default_vol,
-                    key=f"vol_{tank_name}"
-                )
+                if tank_name in active_tank_names:
+                    tanks[tank_name] = st.number_input(
+                        f"{tank_name} volume (L)",
+                        min_value=100,
+                        value=default_vol,
+                        key=f"vol_{tank_name}"
+                    )
         else:
-            tanks = TANKER_CONFIGS[selected_tanker].copy()
-        
+            tanks = {k: v for k, v in TANKER_CONFIGS[selected_tanker].items() if k in active_tank_names}
+
         selected_tankers = [selected_tanker]  # For compatibility with rest of code
         multi_truck_tanks = {selected_tanker: tanks}
     
@@ -144,28 +158,36 @@ with st.sidebar:
         )
         
         if selected_tankers:
-            # Display combined capacity
             multi_truck_tanks = {}
             total_combined_volume = 0
-            
-            st.write("**Selected tankers:**")
+
+            st.caption("Uncheck tanks not available on each truck")
             for tanker in selected_tankers:
-                tanker_vol = sum(TANKER_CONFIGS[tanker].values())
-                total_combined_volume += tanker_vol
-                multi_truck_tanks[tanker] = TANKER_CONFIGS[tanker].copy()
-                st.write(f"- {tanker}: {tanker_vol:,}L")
-            
-            st.success(f"**Combined capacity: {total_combined_volume:,}L**")
+                with st.expander(f"🚛 {tanker}", expanded=True):
+                    active_tanks_for_tanker = {}
+                    for tank_name, vol in TANKER_CONFIGS[tanker].items():
+                        if st.checkbox(f"{tank_name} ({vol:,}L)", value=True, key=f"mt_active_{tanker}_{tank_name}"):
+                            active_tanks_for_tanker[tank_name] = vol
+                    if not active_tanks_for_tanker:
+                        st.warning("Select at least one tank")
+                    else:
+                        tanker_vol = sum(active_tanks_for_tanker.values())
+                        total_combined_volume += tanker_vol
+                        st.caption(f"Active capacity: {tanker_vol:,}L")
+                    multi_truck_tanks[tanker] = active_tanks_for_tanker
+
+            if total_combined_volume > 0:
+                st.success(f"**Combined capacity: {total_combined_volume:,}L**")
         else:
             st.warning("Please select at least one tanker")
             multi_truck_tanks = {}
-        
+
         # For single-truck compatibility
         tanks = {}
         if selected_tankers:
             selected_tanker = selected_tankers[0]
             for tanker in selected_tankers:
-                for tank_name, vol in TANKER_CONFIGS[tanker].items():
+                for tank_name, vol in multi_truck_tanks.get(tanker, {}).items():
                     tanks[f"{tanker} - {tank_name}"] = vol
     
     st.divider()
@@ -219,8 +241,8 @@ st.divider()
 if transport_mode == "Multi-Truck (Equal Density)" and selected_tankers and len(selected_tankers) > 1:
     st.subheader("🚛 Multi-Truck Equal Density Allocation")
     
-    # Calculate total volume across all selected tankers
-    total_combined_volume = sum(sum(TANKER_CONFIGS[t].values()) for t in selected_tankers)
+    # Calculate total volume across all selected tankers (active tanks only)
+    total_combined_volume = sum(sum(multi_truck_tanks[t].values()) for t in selected_tankers if multi_truck_tanks.get(t))
     
     # Target density (equal across all)
     target_density = total_biomass_kg / (total_combined_volume / 1000)
@@ -242,7 +264,7 @@ if transport_mode == "Multi-Truck (Equal Density)" and selected_tankers and len(
     all_tank_allocations = []
     
     for tanker in selected_tankers:
-        tanker_volume = sum(TANKER_CONFIGS[tanker].values())
+        tanker_volume = sum(multi_truck_tanks[tanker].values())
         tanker_volume_m3 = tanker_volume / 1000
         
         # Allocate fish proportionally by volume
@@ -268,7 +290,7 @@ if transport_mode == "Multi-Truck (Equal Density)" and selected_tankers and len(
         })
         
         # Now allocate within this tanker's tanks (equal density within tanker)
-        tanker_tanks = TANKER_CONFIGS[tanker]
+        tanker_tanks = multi_truck_tanks[tanker]
         for tank_name, tank_vol in tanker_tanks.items():
             fish_for_tank = round(fish_for_tanker * (tank_vol / tanker_volume))
             tank_biomass = fish_for_tank * fish_weight / 1000
@@ -885,6 +907,99 @@ Tank Allocations:
         file_name=f"fish_transport_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
         mime="text/plain"
     )
+
+
+# ----- Live Load Calculator -----
+st.divider()
+st.subheader("🔴 Live Load Calculator")
+st.caption("Use this mid-load when a raceway runs dry and you need to top up a tank from a second raceway.")
+
+llc_col1, llc_col2 = st.columns(2)
+
+with llc_col1:
+    st.write("**Select tank to load**")
+    llc_tanker = st.selectbox("Tanker", options=list(TANKER_CONFIGS.keys()), key="llc_tanker")
+    llc_tank = st.selectbox(
+        "Tank",
+        options=list(TANKER_CONFIGS[llc_tanker].keys()),
+        key="llc_tank"
+    )
+    llc_tank_volume_l = TANKER_CONFIGS[llc_tanker][llc_tank]
+    llc_tank_volume_m3 = llc_tank_volume_l / 1000
+    st.info(f"Tank volume: **{llc_tank_volume_l:,}L**")
+
+    st.write("**Target density**")
+    llc_target_density = st.number_input(
+        "Target density (kg/m³)",
+        min_value=1.0,
+        value=float(warning_threshold),
+        step=1.0,
+        key="llc_target_density",
+        help="Fish needed from Raceway B will be calculated to hit this density exactly."
+    )
+
+with llc_col2:
+    st.write("**Already loaded (Raceway A — now empty)**")
+    llc_fish_a = st.number_input("Fish loaded from Raceway A", min_value=0, value=0, step=1, key="llc_fish_a")
+    llc_weight_a = st.number_input("Raceway A fish weight (g)", min_value=1.0, value=float(fish_weight), step=1.0, key="llc_weight_a")
+
+    st.write("**Topping up from Raceway B**")
+    llc_weight_b = st.number_input("Raceway B fish weight (g)", min_value=1.0, value=float(fish_weight), step=1.0, key="llc_weight_b")
+
+# Calculations
+llc_biomass_a = llc_fish_a * llc_weight_a / 1000
+llc_target_biomass = llc_target_density * llc_tank_volume_m3
+llc_remaining_biomass = llc_target_biomass - llc_biomass_a
+llc_fish_b = llc_remaining_biomass * 1000 / llc_weight_b if llc_weight_b > 0 else 0
+llc_fish_b_rounded = max(0, round(llc_fish_b))
+
+llc_total_fish = llc_fish_a + llc_fish_b_rounded
+llc_total_biomass = (llc_fish_a * llc_weight_a + llc_fish_b_rounded * llc_weight_b) / 1000
+llc_final_density = llc_total_biomass / llc_tank_volume_m3
+
+st.divider()
+
+if llc_fish_a == 0:
+    st.info("Enter the number of fish already loaded from Raceway A to calculate the top-up.")
+elif llc_remaining_biomass <= 0:
+    st.error(
+        f"Tank is already at or over target density with Raceway A fish alone. "
+        f"Current density: **{(llc_biomass_a / llc_tank_volume_m3):.2f} kg/m³** "
+        f"(target: {llc_target_density} kg/m³). Do not add more fish."
+    )
+else:
+    # Determine status colour
+    if llc_final_density >= critical_threshold:
+        status_fn = st.error
+        status_label = "Critical"
+    elif llc_final_density >= warning_threshold:
+        status_fn = st.warning
+        status_label = "Warning"
+    else:
+        status_fn = st.success
+        status_label = "OK"
+
+    res_col1, res_col2, res_col3, res_col4 = st.columns(4)
+    with res_col1:
+        st.metric("Load from Raceway B", f"{llc_fish_b_rounded:,} fish")
+    with res_col2:
+        st.metric("Total fish in tank", f"{llc_total_fish:,}")
+    with res_col3:
+        st.metric("Final density", f"{llc_final_density:.2f} kg/m³")
+    with res_col4:
+        st.metric("Total biomass", f"{llc_total_biomass:.2f} kg")
+
+    status_fn(
+        f"**{status_label}** — Load **{llc_fish_b_rounded:,} fish @ {llc_weight_b}g** from Raceway B to reach "
+        f"**{llc_final_density:.2f} kg/m³** in {llc_tanker} {llc_tank} ({llc_tank_volume_l:,}L). "
+        f"Raceway A contributed {llc_fish_a:,} fish @ {llc_weight_a}g."
+    )
+
+    with st.expander("Breakdown", expanded=False):
+        st.write(f"- Raceway A: {llc_fish_a:,} fish × {llc_weight_a}g = **{llc_biomass_a:.2f} kg**")
+        st.write(f"- Raceway B: {llc_fish_b_rounded:,} fish × {llc_weight_b}g = **{llc_fish_b_rounded * llc_weight_b / 1000:.2f} kg**")
+        st.write(f"- Combined biomass: **{llc_total_biomass:.2f} kg** in {llc_tank_volume_l:,}L")
+        st.write(f"- Final density: **{llc_final_density:.2f} kg/m³** (target was {llc_target_density} kg/m³)")
 
 
 # ----- Additional Information -----
